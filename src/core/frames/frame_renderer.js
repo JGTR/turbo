@@ -19,9 +19,7 @@ export class FrameRenderer extends Renderer {
 
   async render() {
     await nextRepaint()
-    this.preservingPermanentElements(() => {
-      this.loadFrameElement()
-    })
+    await this.preservingPermanentElements(() => this.loadFrameElement())
     this.scrollFrameIntoView()
     await nextRepaint()
     this.focusFirstAutofocusableElement()
@@ -31,7 +29,7 @@ export class FrameRenderer extends Renderer {
 
   loadFrameElement() {
     this.delegate.willRenderFrame(this.currentElement, this.newElement)
-    this.renderElement(this.currentElement, this.newElement)
+    return this.renderElement(this.currentElement, this.newElement)
   }
 
   scrollFrameIntoView() {

@@ -2,7 +2,13 @@ export class Bardo {
   static async preservingPermanentElements(delegate, permanentElementMap, callback) {
     const bardo = new this(delegate, permanentElementMap)
     bardo.enter()
-    await callback()
+    const rendering = callback()
+
+    // Only wait for a render that returns something to wait for. After a synchronous render
+    // the permanent elements go back before anything else runs, so a MutationObserver never
+    // finds them outside the document and sees them moved rather than removed.
+    if (rendering !== undefined) await rendering
+
     bardo.leave()
   }
 
