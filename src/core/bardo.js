@@ -7,9 +7,12 @@ export class Bardo {
     // Only wait for a render that returns something to wait for. After a synchronous render
     // the permanent elements go back before anything else runs, so a MutationObserver never
     // finds them outside the document and sees them moved rather than removed.
-    if (rendering !== undefined) await rendering
-
-    bardo.leave()
+    // A render that rejects still gets its permanent elements back.
+    try {
+      if (rendering !== undefined) await rendering
+    } finally {
+      bardo.leave()
+    }
   }
 
   constructor(delegate, permanentElementMap) {

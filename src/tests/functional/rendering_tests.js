@@ -470,7 +470,7 @@ test("preserves permanent elements within turbo-frames when a custom render func
 
 for (const [description, asynchronous] of [
   ["throws", false],
-  ["rejects", true]
+  ["renders and then rejects", true]
 ]) {
   test(`finishes loading a turbo-frame when its custom render function ${description}`, async ({ page }) => {
     const pageErrors = []
@@ -481,10 +481,16 @@ for (const [description, asynchronous] of [
       }
 
       addEventListener("turbo:before-frame-render", (event) => {
-        event.detail.render = asynchronous ? async () => fail() : fail
+        event.detail.render = asynchronous
+          ? async (currentElement, newElement) => {
+              currentElement.replaceChildren(...newElement.childNodes)
+              fail()
+            }
+          : fail
       })
     }, asynchronous)
 
+    const permanentElement = await page.locator("#permanent-in-frame").elementHandle()
     await page.click("#permanent-in-frame-element-link")
     await nextEventNamed(page, "turbo:before-frame-render")
     const loaded = await page.evaluate(() =>
@@ -497,6 +503,8 @@ for (const [description, asynchronous] of [
     expect(loaded).toEqual("loaded")
     await nextEventNamed(page, "turbo:frame-render")
     expect(pageErrors).toContain("custom render failed")
+    expect(await strictElementEquals(permanentElement, await page.locator("#permanent-in-frame"))).toEqual(true)
+    await expect(page.locator("meta[name=turbo-permanent-placeholder]")).toHaveCount(0)
   })
 }
 
