@@ -7,12 +7,18 @@ export class Bardo {
     // Only wait for a render that returns something to wait for. After a synchronous render
     // the permanent elements go back before anything else runs, so a MutationObserver never
     // finds them outside the document and sees them moved rather than removed.
-    // A render that rejects still gets its permanent elements back.
-    try {
-      if (rendering !== undefined) await rendering
-    } finally {
-      bardo.leave()
+    if (rendering !== undefined) {
+      try {
+        await rendering
+      } catch (error) {
+        // A failed render may not have swapped anything in, so only the permanent elements
+        // whose placeholders reached the page go back.
+        bardo.leave({ placedOnly: true })
+        throw error
+      }
     }
+
+    bardo.leave()
   }
 
   constructor(delegate, permanentElementMap) {
@@ -28,11 +34,13 @@ export class Bardo {
     }
   }
 
-  leave() {
+  leave({ placedOnly = false } = {}) {
     for (const id in this.permanentElementMap) {
       const [currentPermanentElement] = this.permanentElementMap[id]
-      this.replaceCurrentPermanentElementWithClone(currentPermanentElement)
-      this.replacePlaceholderWithPermanentElement(currentPermanentElement)
+      if (!placedOnly || this.getPlaceholderById(currentPermanentElement.id)) {
+        this.replaceCurrentPermanentElementWithClone(currentPermanentElement)
+        this.replacePlaceholderWithPermanentElement(currentPermanentElement)
+      }
       this.delegate.leavingBardo(currentPermanentElement)
     }
   }

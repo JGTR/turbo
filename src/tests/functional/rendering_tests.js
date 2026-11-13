@@ -468,27 +468,50 @@ test("preserves permanent elements within turbo-frames when a custom render func
   expect(await page.evaluate(() => window.renderLog)).toEqual(["started", "rendered", "turbo:frame-render"])
 })
 
-for (const [description, asynchronous] of [
-  ["throws", false],
-  ["renders and then rejects", true]
-]) {
-  test(`finishes loading a turbo-frame when its custom render function ${description}`, async ({ page }) => {
-    const pageErrors = []
-    page.on("pageerror", (error) => pageErrors.push(error.message))
-    await page.evaluate((asynchronous) => {
+async function failCustomRenderOn(page, eventName, failure) {
+  await page.evaluate(
+    ([eventName, failure]) => {
       const fail = () => {
         throw new Error("custom render failed")
       }
+      const renders = {
+        "throws": fail,
+        "rejects before rendering": async () => fail(),
+        "renders and then rejects": async (currentElement, newElement) => {
+          if (currentElement == document.body) currentElement.replaceWith(newElement)
+          else currentElement.replaceChildren(...newElement.childNodes)
+          fail()
+        }
+      }
 
-      addEventListener("turbo:before-frame-render", (event) => {
-        event.detail.render = asynchronous
-          ? async (currentElement, newElement) => {
-              currentElement.replaceChildren(...newElement.childNodes)
-              fail()
-            }
-          : fail
+      addEventListener(eventName, (event) => {
+        event.detail.render = renders[failure]
       })
-    }, asynchronous)
+    },
+    [eventName, failure]
+  )
+}
+
+for (const failure of ["rejects before rendering", "renders and then rejects"]) {
+  test(`keeps the permanent element when a custom page render ${failure}`, async ({ page }) => {
+    const pageError = page.waitForEvent("pageerror", (error) => error.message.includes("custom render failed"))
+    await failCustomRenderOn(page, "turbo:before-render", failure)
+
+    const permanentElement = await page.locator("#permanent").elementHandle()
+    await page.click("#permanent-element-link")
+    await pageError
+
+    expect(await strictElementEquals(permanentElement, await page.locator("#permanent"))).toEqual(true)
+    await expect(page.locator("#permanent")).toHaveText("Rendering")
+    await expect(page.locator("meta[name=turbo-permanent-placeholder]")).toHaveCount(0)
+  })
+}
+
+for (const failure of ["throws", "rejects before rendering", "renders and then rejects"]) {
+  test(`finishes loading a turbo-frame when its custom render function ${failure}`, async ({ page }) => {
+    const pageErrors = []
+    page.on("pageerror", (error) => pageErrors.push(error.message))
+    await failCustomRenderOn(page, "turbo:before-frame-render", failure)
 
     const permanentElement = await page.locator("#permanent-in-frame").elementHandle()
     await page.click("#permanent-in-frame-element-link")
