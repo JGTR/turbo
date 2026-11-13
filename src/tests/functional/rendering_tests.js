@@ -443,12 +443,13 @@ test("preserves permanent elements when a custom render function is asynchronous
   await renderAsynchronouslyOn(page, "turbo:before-render", "turbo:render")
 
   await page.click("#permanent-element-link")
+  await finishPendingRender(page)
   await nextEventNamed(page, "turbo:render")
 
   await expect(page.locator("h1")).toHaveText("Permanent element")
   expect(await strictElementEquals(permanentElement, await page.locator("#permanent"))).toEqual(true)
   await expect(page.locator("#permanent")).toHaveText("Rendering")
-  expect(await page.evaluate(() => window.renderLog)).toEqual(["rendered", "turbo:render"])
+  expect(await page.evaluate(() => window.renderLog)).toEqual(["started", "rendered", "turbo:render"])
 })
 
 test("preserves permanent elements within turbo-frames when a custom render function is asynchronous", async ({
@@ -458,13 +459,46 @@ test("preserves permanent elements within turbo-frames when a custom render func
   await renderAsynchronouslyOn(page, "turbo:before-frame-render", "turbo:frame-render")
 
   await page.click("#permanent-in-frame-element-link")
+  await finishPendingRender(page)
   await nextEventNamed(page, "turbo:frame-render")
 
   expect(await strictElementEquals(permanentElement, await page.locator("#permanent-in-frame"))).toEqual(true)
   await expect(page.locator("#permanent-in-frame")).toHaveText("Rendering")
   await expect(page.locator("meta[name=turbo-permanent-placeholder]")).toHaveCount(0)
-  expect(await page.evaluate(() => window.renderLog)).toEqual(["rendered", "turbo:frame-render"])
+  expect(await page.evaluate(() => window.renderLog)).toEqual(["started", "rendered", "turbo:frame-render"])
 })
+
+for (const [description, asynchronous] of [
+  ["throws", false],
+  ["rejects", true]
+]) {
+  test(`finishes loading a turbo-frame when its custom render function ${description}`, async ({ page }) => {
+    const pageErrors = []
+    page.on("pageerror", (error) => pageErrors.push(error.message))
+    await page.evaluate((asynchronous) => {
+      const fail = () => {
+        throw new Error("custom render failed")
+      }
+
+      addEventListener("turbo:before-frame-render", (event) => {
+        event.detail.render = asynchronous ? async () => fail() : fail
+      })
+    }, asynchronous)
+
+    await page.click("#permanent-in-frame-element-link")
+    await nextEventNamed(page, "turbo:before-frame-render")
+    const loaded = await page.evaluate(() =>
+      Promise.race([
+        document.getElementById("frame").loaded.then(() => "loaded"),
+        new Promise((resolve) => setTimeout(() => resolve("pending"), 1000))
+      ])
+    )
+
+    expect(loaded).toEqual("loaded")
+    await nextEventNamed(page, "turbo:frame-render")
+    expect(pageErrors).toContain("custom render failed")
+  })
+}
 
 test("restores focus during page rendering when transposing the activeElement", async ({ page }) => {
   await page.press("#permanent-input", "Enter")
@@ -703,6 +737,7 @@ function modifyBodyAfterRemoval(page) {
   })
 }
 
+// The custom render waits until finishPendingRender, so the render event must wait for it too
 function renderAsynchronouslyOn(page, beforeRenderEventName, renderEventName) {
   return page.evaluate(
     ([beforeRenderEventName, renderEventName]) => {
@@ -713,7 +748,8 @@ function renderAsynchronouslyOn(page, beforeRenderEventName, renderEventName) {
         const { render } = event.detail
 
         event.detail.render = async (currentElement, newElement) => {
-          await new Promise((resolve) => setTimeout(resolve, 20))
+          window.renderLog.push("started")
+          await new Promise((resolve) => (window.finishRender = resolve))
           await render(currentElement, newElement)
           window.renderLog.push("rendered")
         }
@@ -721,6 +757,13 @@ function renderAsynchronouslyOn(page, beforeRenderEventName, renderEventName) {
     },
     [beforeRenderEventName, renderEventName]
   )
+}
+
+async function finishPendingRender(page) {
+  await page.waitForFunction(() => window.finishRender)
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 250)))
+  expect(await page.evaluate(() => window.renderLog)).toEqual(["started"])
+  await page.evaluate(() => window.finishRender())
 }
 
 function observeConnectionOf(page, selector) {
