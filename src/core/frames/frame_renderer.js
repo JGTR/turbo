@@ -19,9 +19,7 @@ export class FrameRenderer extends Renderer {
 
   async render() {
     await nextRepaint()
-    this.preservingPermanentElements(() => {
-      this.loadFrameElement()
-    })
+    await this.#loadFrameElementPreservingPermanentElements()
     this.scrollFrameIntoView()
     await nextRepaint()
     this.focusFirstAutofocusableElement()
@@ -29,9 +27,17 @@ export class FrameRenderer extends Renderer {
     this.activateScriptElements()
   }
 
+  // Waits for the render to finish, but a render that fails stays an unhandled rejection, as
+  // it was before the render was awaited, so the frame still finishes loading.
+  #loadFrameElementPreservingPermanentElements() {
+    return new Promise((resolve) => {
+      this.preservingPermanentElements(() => this.loadFrameElement()).finally(resolve)
+    })
+  }
+
   loadFrameElement() {
     this.delegate.willRenderFrame(this.currentElement, this.newElement)
-    this.renderElement(this.currentElement, this.newElement)
+    return this.renderElement(this.currentElement, this.newElement)
   }
 
   scrollFrameIntoView() {

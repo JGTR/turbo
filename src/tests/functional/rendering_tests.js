@@ -414,6 +414,123 @@ test("preserves permanent elements", async ({ page }) => {
   expect(await strictElementEquals(permanentElement, await page.locator("#permanent"))).toEqual(true)
 })
 
+test("keeps permanent elements in the document whenever mutation observers run", async ({ page }) => {
+  await observeConnectionOf(page, "#permanent")
+
+  await page.click("#permanent-element-link")
+  await nextEventNamed(page, "turbo:render")
+
+  const observations = await page.evaluate(() => window.observedConnections)
+  expect(observations.length).toBeGreaterThan(0)
+  expect(observations).not.toContain(false)
+})
+
+test("keeps permanent elements within turbo-frames in the document whenever mutation observers run", async ({
+  page
+}) => {
+  await observeConnectionOf(page, "#permanent-in-frame")
+
+  await page.click("#permanent-in-frame-element-link")
+  await nextEventNamed(page, "turbo:frame-render")
+
+  const observations = await page.evaluate(() => window.observedConnections)
+  expect(observations.length).toBeGreaterThan(0)
+  expect(observations).not.toContain(false)
+})
+
+test("preserves permanent elements when a custom render function is asynchronous", async ({ page }) => {
+  const permanentElement = await page.locator("#permanent").elementHandle()
+  await renderAsynchronouslyOn(page, "turbo:before-render", "turbo:render")
+
+  await page.click("#permanent-element-link")
+  await finishPendingRender(page)
+  await nextEventNamed(page, "turbo:render")
+
+  await expect(page.locator("h1")).toHaveText("Permanent element")
+  expect(await strictElementEquals(permanentElement, await page.locator("#permanent"))).toEqual(true)
+  await expect(page.locator("#permanent")).toHaveText("Rendering")
+  expect(await page.evaluate(() => window.renderLog)).toEqual(["started", "rendered", "turbo:render"])
+})
+
+test("preserves permanent elements within turbo-frames when a custom render function is asynchronous", async ({
+  page
+}) => {
+  const permanentElement = await page.locator("#permanent-in-frame").elementHandle()
+  await renderAsynchronouslyOn(page, "turbo:before-frame-render", "turbo:frame-render")
+
+  await page.click("#permanent-in-frame-element-link")
+  await finishPendingRender(page)
+  await nextEventNamed(page, "turbo:frame-render")
+
+  expect(await strictElementEquals(permanentElement, await page.locator("#permanent-in-frame"))).toEqual(true)
+  await expect(page.locator("#permanent-in-frame")).toHaveText("Rendering")
+  await expect(page.locator("meta[name=turbo-permanent-placeholder]")).toHaveCount(0)
+  expect(await page.evaluate(() => window.renderLog)).toEqual(["started", "rendered", "turbo:frame-render"])
+})
+
+async function failCustomRenderOn(page, eventName, failure) {
+  await page.evaluate(
+    ([eventName, failure]) => {
+      const fail = () => {
+        throw new Error("custom render failed")
+      }
+      const renders = {
+        "throws": fail,
+        "rejects before rendering": async () => fail(),
+        "renders and then rejects": async (currentElement, newElement) => {
+          if (currentElement == document.body) currentElement.replaceWith(newElement)
+          else currentElement.replaceChildren(...newElement.childNodes)
+          fail()
+        }
+      }
+
+      addEventListener(eventName, (event) => {
+        event.detail.render = renders[failure]
+      })
+    },
+    [eventName, failure]
+  )
+}
+
+for (const failure of ["rejects before rendering", "renders and then rejects"]) {
+  test(`keeps the permanent element when a custom page render ${failure}`, async ({ page }) => {
+    const pageError = page.waitForEvent("pageerror", (error) => error.message.includes("custom render failed"))
+    await failCustomRenderOn(page, "turbo:before-render", failure)
+
+    const permanentElement = await page.locator("#permanent").elementHandle()
+    await page.click("#permanent-element-link")
+    await pageError
+
+    expect(await strictElementEquals(permanentElement, await page.locator("#permanent"))).toEqual(true)
+    await expect(page.locator("#permanent")).toHaveText("Rendering")
+    await expect(page.locator("meta[name=turbo-permanent-placeholder]")).toHaveCount(0)
+  })
+}
+
+for (const failure of ["throws", "rejects before rendering", "renders and then rejects"]) {
+  test(`finishes loading a turbo-frame when its custom render function ${failure}`, async ({ page }) => {
+    const pageErrors = []
+    page.on("pageerror", (error) => pageErrors.push(error.message))
+    await failCustomRenderOn(page, "turbo:before-frame-render", failure)
+
+    const permanentElement = await page.locator("#permanent-in-frame").elementHandle()
+    await page.click("#permanent-in-frame-element-link")
+    await nextEventNamed(page, "turbo:before-frame-render")
+    const loaded = await page.evaluate(() =>
+      Promise.race([
+        document.getElementById("frame").loaded.then(() => "loaded"),
+        new Promise((resolve) => setTimeout(() => resolve("pending"), 1000))
+      ])
+    )
+
+    expect(loaded).toEqual("loaded")
+    await nextEventNamed(page, "turbo:frame-render")
+    expect(pageErrors).toContain("custom render failed")
+    expect(await strictElementEquals(permanentElement, await page.locator("#permanent-in-frame"))).toEqual(true)
+    await expect(page.locator("meta[name=turbo-permanent-placeholder]")).toHaveCount(0)
+  })
+}
+
 test("restores focus during page rendering when transposing the activeElement", async ({ page }) => {
   await page.press("#permanent-input", "Enter")
   await nextEventNamed(page, "turbo:load")
@@ -649,4 +766,45 @@ function modifyBodyAfterRemoval(page) {
     })
     observer.observe(documentElement, { childList: true })
   })
+}
+
+// The custom render waits until finishPendingRender, so the render event must wait for it too
+function renderAsynchronouslyOn(page, beforeRenderEventName, renderEventName) {
+  return page.evaluate(
+    ([beforeRenderEventName, renderEventName]) => {
+      window.renderLog = []
+      addEventListener(renderEventName, () => window.renderLog.push(renderEventName))
+
+      addEventListener(beforeRenderEventName, (event) => {
+        const { render } = event.detail
+
+        event.detail.render = async (currentElement, newElement) => {
+          window.renderLog.push("started")
+          await new Promise((resolve) => (window.finishRender = resolve))
+          await render(currentElement, newElement)
+          window.renderLog.push("rendered")
+        }
+      })
+    },
+    [beforeRenderEventName, renderEventName]
+  )
+}
+
+async function finishPendingRender(page) {
+  await page.waitForFunction(() => window.finishRender)
+  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 250)))
+  expect(await page.evaluate(() => window.renderLog)).toEqual(["started"])
+  await page.evaluate(() => window.finishRender())
+}
+
+function observeConnectionOf(page, selector) {
+  return page.evaluate((selector) => {
+    const element = document.querySelector(selector)
+    window.observedConnections = []
+
+    new MutationObserver(() => window.observedConnections.push(element.isConnected)).observe(document.documentElement, {
+      childList: true,
+      subtree: true
+    })
+  }, selector)
 }

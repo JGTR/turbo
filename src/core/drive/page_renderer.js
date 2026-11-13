@@ -88,9 +88,9 @@ export class PageRenderer extends Renderer {
   }
 
   async replaceBody() {
-    await this.preservingPermanentElements(async () => {
+    await this.preservingPermanentElements(() => {
       this.activateNewBody()
-      await this.assignNewBody()
+      return this.assignNewBody()
     })
   }
 
@@ -194,8 +194,8 @@ export class PageRenderer extends Renderer {
     }
   }
 
-  async assignNewBody() {
-    await this.renderElement(this.currentElement, this.newElement)
+  assignNewBody() {
+    return this.renderElement(this.currentElement, this.newElement)
   }
 
   get unusedDynamicStylesheetElements() {
